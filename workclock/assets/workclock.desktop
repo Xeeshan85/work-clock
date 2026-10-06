@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=WorkClock
+GenericName=Work Hours Timer
+Comment=Stopwatch for logging work hours
+Exec=@EXEC@
+Icon=workclock
+Terminal=false
+Categories=Office;Utility;Clock;
+Keywords=timer;stopwatch;work;hours;timesheet;
+StartupWMClass=workclock
+StartupNotify=true
+Actions=ToggleTimer;
+
+[Desktop Action ToggleTimer]
+Name=Start or Stop Timer
+Exec=@EXEC@ --toggle
