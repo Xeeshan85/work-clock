@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSettings
 
-from workclock.validate import TimerError
+from workclock.validate import MAX_TS_MS, TimerError
 
 _AUTOSTART = """\
 [Desktop Entry]
@@ -70,6 +70,36 @@ class Settings:
 
     def set_centiseconds(self, value: bool) -> None:
         self._store.setValue("centiseconds", value)
+
+    def clock_format(self) -> str:
+        value = self._store.value("clock_format", "")
+        if isinstance(value, str) and value in {"hm", "hms", "hmsc"}:
+            return value
+        return "hmsc" if self.centiseconds() else "hms"
+
+    def set_clock_format(self, value: str) -> None:
+        choice = value if value in {"hm", "hms", "hmsc"} else "hmsc"
+        self._store.setValue("clock_format", choice)
+        self.set_centiseconds(choice == "hmsc")
+
+    def primary_is_total(self) -> bool:
+        return _bool_value(self._store.value("primary_is_total", False), False)
+
+    def set_primary_is_total(self, value: bool) -> None:
+        self._store.setValue("primary_is_total", value)
+
+    def countdown_end(self) -> int:
+        return _bounded_int(self._store.value("countdown_end", 0), 0, MAX_TS_MS, 0)
+
+    def countdown_duration(self) -> int:
+        return _bounded_int(self._store.value("countdown_duration", 0), 0, 24 * 60 * 60 * 1000, 0)
+
+    def set_countdown(self, end_ms: int, duration_ms: int) -> None:
+        self._store.setValue("countdown_end", int(end_ms))
+        self._store.setValue("countdown_duration", int(duration_ms))
+
+    def clear_countdown(self) -> None:
+        self.set_countdown(0, 0)
 
     def autostart(self) -> bool:
         return autostart_path().is_file() and not autostart_path().is_symlink()

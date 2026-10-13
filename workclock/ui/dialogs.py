@@ -68,16 +68,30 @@ def resolve_recovery(service: TimerService, parent: QWidget | None = None) -> No
     service.ensure_midnight()
 
 
-def ask_submit(parent: QWidget, day: str, total: str, count: int) -> str | None:
+def ask_submit(
+    parent: QWidget,
+    day: str,
+    total: str,
+    count: int,
+    *,
+    relock: bool = False,
+) -> str | None:
     dialog = QDialog(parent)
     dialog.setWindowTitle("Submit day")
     layout = QVBoxLayout(dialog)
-    layout.addWidget(QLabel(f"Submit {day}? {count} sessions, {total}."))
-    layout.addWidget(QLabel("Note"))
+    if relock:
+        message = (
+            f"Submit {day} again and lock it? {count} sessions, {total}. No new log will be added."
+        )
+    else:
+        message = f"Submit {day}? {count} sessions, {total}."
+    layout.addWidget(QLabel(message))
     note = QPlainTextEdit()
-    note.setPlaceholderText("Optional note for this log")
-    note.setTabChangesFocus(True)
-    layout.addWidget(note)
+    if not relock:
+        layout.addWidget(QLabel("Note"))
+        note.setPlaceholderText("Optional note for this log")
+        note.setTabChangesFocus(True)
+        layout.addWidget(note)
     buttons = QDialogButtonBox(
         QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
     )
@@ -86,6 +100,8 @@ def ask_submit(parent: QWidget, day: str, total: str, count: int) -> str | None:
     layout.addWidget(buttons)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
+    if relock:
+        return ""
     return note.toPlainText()
 
 
@@ -198,6 +214,44 @@ def _time_edit(value_ms: int, minimum_ms: int | None, maximum_ms: int | None) ->
         edit.setMaximumDateTime(QDateTime.fromMSecsSinceEpoch(maximum_ms))
     edit.setKeyboardTracking(False)
     return edit
+
+
+def ask_project_change(parent: QWidget, projects: list[str]) -> tuple[str, str | None] | None:
+    """Return the current name and the new name. None removes the name."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("Projects")
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel("Rename combines every session that uses the old name."))
+    names = QComboBox()
+    names.addItems(projects)
+    layout.addWidget(names)
+    new_name = QLineEdit()
+    new_name.setPlaceholderText("New name")
+    layout.addWidget(new_name)
+    buttons = QDialogButtonBox()
+    rename = buttons.addButton("Rename", QDialogButtonBox.ButtonRole.ActionRole)
+    remove = buttons.addButton("Remove name", QDialogButtonBox.ButtonRole.DestructiveRole)
+    buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+    chosen: list[tuple[str, str | None]] = []
+
+    def accept_rename() -> None:
+        if not new_name.text().strip():
+            QMessageBox.warning(dialog, "WorkClock", "Enter the new name.")
+            return
+        chosen.append((names.currentText(), new_name.text()))
+        dialog.accept()
+
+    def accept_remove() -> None:
+        chosen.append((names.currentText(), None))
+        dialog.accept()
+
+    rename.clicked.connect(accept_rename)
+    remove.clicked.connect(accept_remove)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    if dialog.exec() != QDialog.DialogCode.Accepted or not chosen:
+        return None
+    return chosen[0]
 
 
 def session_project(session: Session) -> str:

@@ -15,7 +15,14 @@ from workclock.timeutil import (
     split_span,
     start_of_local_day_ms,
 )
-from workclock.validate import MAX_ADD_MS, MAX_MANUAL_MS, MAX_NOTE, TimerError, clean_text
+from workclock.validate import (
+    MAX_ADD_MS,
+    MAX_MANUAL_MS,
+    MAX_NOTE,
+    MAX_PROJECT,
+    TimerError,
+    clean_text,
+)
 
 
 class TimerService:
@@ -202,9 +209,42 @@ class TimerService:
             session = self.db.get_session(session_id)
             if session is None:
                 raise TimerError("That session no longer exists.")
-            self._require_editable(session)
             self.db.delete_session(session_id)
             self._recompute_day(session.date)
+
+    def delete_log(self, submission_id: int) -> None:
+        with self.db.transaction():
+            submission = self.db.get_submission(submission_id)
+            if submission is None:
+                raise TimerError("That log no longer exists.")
+            day = self._day_for_submission(submission)
+            members = [
+                session
+                for session in self.db.sessions_on(day.date)
+                if session.submission_id == submission_id
+            ]
+            for session in members:
+                if session.end_ts is None:
+                    raise TimerError("Stop the timer before deleting that log.")
+                self.db.delete_session(session.id)
+            self.db.delete_submission(submission_id)
+            self._recompute_day(day.date)
+
+    def rename_project(self, old: str, new: str | None) -> int:
+        source = clean_text(old, MAX_PROJECT, "Project")
+        if source is None:
+            raise TimerError("Choose a project.")
+        target = clean_text(new, MAX_PROJECT, "Project")
+        if source == target:
+            raise TimerError("That is already the name.")
+        with self.db.transaction():
+            rows = self.db.sessions_with_project(source)
+            if not rows:
+                raise TimerError("That project has no sessions.")
+            self.db.set_project_name(source, target)
+            for day in {session.date for session in rows}:
+                self._recompute_day(day)
+            return len(rows)
 
     def submit_day(self, day_date: str, note: str | None) -> Day:
         note = clean_text(note, MAX_NOTE, "Note")

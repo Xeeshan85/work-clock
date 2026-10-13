@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import QTime
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -34,8 +35,12 @@ class SettingsDialog(QDialog):
         self._launch_command = launch_command
         self.setWindowTitle("Settings")
 
-        self.centiseconds = QCheckBox("Show centiseconds")
-        self.centiseconds.setChecked(settings.centiseconds())
+        self.clock_format = QComboBox()
+        self.clock_format.addItem("Hours and minutes (flip clock)", "hm")
+        self.clock_format.addItem("Hours, minutes, and seconds", "hms")
+        self.clock_format.addItem("Hours, minutes, seconds, and centiseconds", "hmsc")
+        format_index = self.clock_format.findData(settings.clock_format())
+        self.clock_format.setCurrentIndex(format_index if format_index >= 0 else 2)
         self.idle = QSpinBox()
         self.idle.setRange(0, 240)
         self.idle.setSuffix(" min")
@@ -65,7 +70,7 @@ class SettingsDialog(QDialog):
         self.autostart.setChecked(settings.autostart())
 
         form = QFormLayout()
-        form.addRow(self.centiseconds)
+        form.addRow("Clock", self.clock_format)
         form.addRow("Idle prompt", self.idle)
         form.addRow("Daily target", self.target)
         form.addRow("Still working after", self.still)
@@ -100,7 +105,8 @@ class SettingsDialog(QDialog):
 
     def accept(self) -> None:
         settings = self._settings
-        settings.set_centiseconds(self.centiseconds.isChecked())
+        chosen = self.clock_format.currentData()
+        settings.set_clock_format(chosen if isinstance(chosen, str) else "hmsc")
         settings.set_idle_minutes(self.idle.value())
         settings.set_target_hours(self.target.value())
         settings.set_still_working_hours(self.still.value())

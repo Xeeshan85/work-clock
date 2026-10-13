@@ -11,7 +11,7 @@ import pytest
 from workclock.db import Database
 from workclock.export import dumps, loads, restore, sessions_csv, summary_csv
 from workclock.timer_service import TimerService
-from workclock.timeutil import format_hms, split_span, to_ms
+from workclock.timeutil import format_elapsed, format_hms, split_span, to_ms
 from workclock.validate import TimerError
 
 TZ = timezone(timedelta(hours=-5))
@@ -51,6 +51,9 @@ def test_elapsed_display_uses_timestamps() -> None:
     assert format_hms(90_000) == "00:01:30.00"
     assert format_hms(1_500) == "00:00:01.50"
     assert format_hms(3_600_000, centiseconds=False) == "01:00:00"
+    assert format_elapsed(90_000, "hm") == "00:01"
+    assert format_elapsed(90_000, "hms") == "00:01:30"
+    assert format_elapsed(1_500, "hmsc") == "00:00:01.50"
 
 
 def test_running_elapsed_is_wall_clock_not_ticks(svc: TimerService, clock: Clock) -> None:
@@ -193,6 +196,27 @@ def test_reopen_allows_edit_and_resubmit_keeps_both_logs(svc: TimerService, cloc
     assert locked.total_ms == 90 * 60 * 1000
     assert len(svc.day_logs("2026-10-06")) == 1
     assert svc.day_logs("2026-10-06")[0].note == "once"
+
+
+def test_rename_merges_projects_and_delete_removes_submitted_work(
+    svc: TimerService, clock: Clock
+) -> None:
+    clock.value = at(2026, 10, 6, 18, 0)
+    svc.add_manual(at(2026, 10, 6, 9, 0), at(2026, 10, 6, 10, 0), "Learning-Persona", None)
+    svc.add_manual(at(2026, 10, 6, 10, 0), at(2026, 10, 6, 11, 0), "Learning-Personal", None)
+    svc.submit_day("2026-10-06", "study")
+    assert svc.rename_project("Learning-Persona", "Learning-Personal") == 1
+    assert {session.project for session in svc.db.all_sessions()} == {"Learning-Personal"}
+    log = svc.day_logs("2026-10-06")[0]
+    kept = log.sessions[1].id
+    svc.delete_session(log.sessions[0].id)
+    assert [session.id for session in svc.db.all_sessions()] == [kept]
+    day = svc.db.get_day("2026-10-06")
+    assert day is not None
+    assert day.total_ms == 60 * 60 * 1000
+    svc.delete_log(svc.day_logs("2026-10-06")[0].id)
+    assert svc.db.all_sessions() == []
+    assert svc.db.get_day("2026-10-06") is None
 
 
 def test_add_time_extends_a_running_timer(svc: TimerService, clock: Clock) -> None:

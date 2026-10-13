@@ -1,4 +1,4 @@
-"""Submitted days, range filter, and the bar chart."""
+"""Submitted days, range filter, and the line chart."""
 
 from __future__ import annotations
 
@@ -22,14 +22,17 @@ from PySide6.QtWidgets import (
 
 from workclock.models import DaySummary, LogDetail, Session
 from workclock.timeutil import format_clock, format_hhmm, format_hms
-from workclock.ui.chart import BarChart
+from workclock.ui.chart import LineChart
 
 
 class HistoryTab(QWidget):
     changed = Signal()
     selection_changed = Signal()
     reopen_clicked = Signal()
+    submit_clicked = Signal()
     edit_note_clicked = Signal()
+    delete_log_clicked = Signal()
+    delete_session_clicked = Signal()
     export_summary_clicked = Signal()
     export_sessions_clicked = Signal()
 
@@ -45,9 +48,12 @@ class HistoryTab(QWidget):
         for edit in (self.start_date, self.end_date):
             edit.setCalendarPopup(True)
             edit.setDisplayFormat("yyyy-MM-dd")
-        self.chart = BarChart()
+        self.chart = LineChart()
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
+        self._follow_end = True
+        self._today = today
+        self._prefer: str | None = None
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(
@@ -63,12 +69,18 @@ class HistoryTab(QWidget):
         self.detail.setHeaderLabels(["Start – end", "Duration", "Note"])
         self.detail.setColumnCount(3)
 
+        self.submit_button = QPushButton("Submit day")
         self.reopen_button = QPushButton("Reopen day")
         self.note_button = QPushButton("Edit log note")
+        self.delete_log_button = QPushButton("Delete log")
+        self.delete_session_button = QPushButton("Delete session")
         summary_button = QPushButton("Export summary")
         sessions_button = QPushButton("Export sessions")
+        self.submit_button.clicked.connect(self.submit_clicked)
         self.reopen_button.clicked.connect(self.reopen_clicked)
         self.note_button.clicked.connect(self.edit_note_clicked)
+        self.delete_log_button.clicked.connect(self.delete_log_clicked)
+        self.delete_session_button.clicked.connect(self.delete_session_clicked)
         summary_button.clicked.connect(self.export_summary_clicked)
         sessions_button.clicked.connect(self.export_sessions_clicked)
 
@@ -81,8 +93,11 @@ class HistoryTab(QWidget):
         filters.addWidget(self.end_date)
 
         actions = QHBoxLayout()
+        actions.addWidget(self.submit_button)
         actions.addWidget(self.reopen_button)
         actions.addWidget(self.note_button)
+        actions.addWidget(self.delete_log_button)
+        actions.addWidget(self.delete_session_button)
         actions.addWidget(summary_button)
         actions.addWidget(sessions_button)
 
@@ -97,7 +112,7 @@ class HistoryTab(QWidget):
         self.project_box.currentIndexChanged.connect(self.changed)
         self.range_box.currentIndexChanged.connect(self.changed)
         self.start_date.dateChanged.connect(self.changed)
-        self.end_date.dateChanged.connect(self.changed)
+        self.end_date.dateChanged.connect(self._end_date_changed)
         self.table.itemSelectionChanged.connect(self.selection_changed)
 
     def project(self) -> str | None:
@@ -106,6 +121,37 @@ class HistoryTab(QWidget):
 
     def chart_range(self) -> str:
         return self.range_box.currentText()
+
+    def follow_today(self, today: date) -> None:
+        self._today = today
+        if not self._follow_end:
+            return
+        target = QDate(today.year, today.month, today.day)
+        if self.end_date.date() < target:
+            self.end_date.blockSignals(True)
+            self.end_date.setDate(target)
+            self.end_date.blockSignals(False)
+
+    def reveal_date(self, day: str) -> None:
+        shown = QDate.fromString(day, Qt.DateFormat.ISODate)
+        if not shown.isValid():
+            return
+        today = QDate(self._today.year, self._today.month, self._today.day)
+        if self.end_date.date() < shown:
+            self.end_date.blockSignals(True)
+            self.end_date.setDate(shown)
+            self.end_date.blockSignals(False)
+            self._follow_end = shown >= today
+        if self.start_date.date() > shown:
+            self.start_date.blockSignals(True)
+            self.start_date.setDate(shown)
+            self.start_date.blockSignals(False)
+        self._prefer = day
+
+    def _end_date_changed(self) -> None:
+        today = QDate(self._today.year, self._today.month, self._today.day)
+        self._follow_end = self.end_date.date() >= today
+        self.changed.emit()
 
     def date_range(self) -> tuple[str, str]:
         return (
@@ -130,7 +176,9 @@ class HistoryTab(QWidget):
         self.chart.set_points(points)
 
     def set_rows(self, rows: list[DaySummary]) -> None:
-        selected = self.selected_date()
+        preferred = self._prefer
+        self._prefer = None
+        selected = preferred or self.selected_date()
         self.table.blockSignals(True)
         self.table.setRowCount(len(rows))
         for index, row in enumerate(rows):
@@ -176,6 +224,13 @@ class HistoryTab(QWidget):
         value = chosen.data(0, Qt.ItemDataRole.UserRole)
         return value if isinstance(value, int) else None
 
+    def selected_session_id(self) -> int | None:
+        item = self.detail.currentItem()
+        if item is None or item.parent() is None:
+            return None
+        value = item.data(0, Qt.ItemDataRole.UserRole)
+        return value if isinstance(value, int) else None
+
     def set_detail(
         self,
         logs: list[LogDetail],
@@ -203,6 +258,7 @@ class HistoryTab(QWidget):
                         session.note or session.project or "",
                     ]
                 )
+                child.setData(0, Qt.ItemDataRole.UserRole, session.id)
                 parent.addChild(child)
             self.detail.addTopLevelItem(parent)
             parent.setExpanded(True)
@@ -218,6 +274,7 @@ class HistoryTab(QWidget):
                         session.note or session.project or "",
                     ]
                 )
+                child.setData(0, Qt.ItemDataRole.UserRole, session.id)
                 parent.addChild(child)
             self.detail.addTopLevelItem(parent)
             parent.setExpanded(True)

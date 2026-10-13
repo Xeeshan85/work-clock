@@ -6,7 +6,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Callable
-from datetime import date, datetime, time
+from datetime import date, datetime, time, tzinfo
 from pathlib import Path
 from urllib.parse import quote
 
@@ -28,11 +28,14 @@ from PySide6.QtWidgets import (
 from workclock.db import SCHEMA_VERSION, Database
 from workclock.export import dumps, loads, restore, sessions_csv, summary_csv
 from workclock.idle import session_idle_ms
+from workclock.models import Session
 from workclock.paths import launch_command
 from workclock.settings import Settings
 from workclock.timer_service import TimerService
 from workclock.timeutil import (
     decimal_hours,
+    format_clock,
+    format_elapsed,
     format_hhmm,
     format_hms,
     from_ms,
@@ -46,8 +49,10 @@ from workclock.timeutil import (
     week_dates,
 )
 from workclock.tray import TrayIcon
+from workclock.ui.alarm import ring
 from workclock.ui.dialogs import (
     ask_add_time,
+    ask_project_change,
     ask_session,
     ask_submit,
     ask_text,
@@ -57,7 +62,7 @@ from workclock.ui.dialogs import (
 )
 from workclock.ui.history_tab import HistoryTab
 from workclock.ui.settings_dialog import SettingsDialog
-from workclock.ui.timer_tab import TimerTab
+from workclock.ui.timer_page import TimerPage
 from workclock.ui.today_tab import TodayTab
 from workclock.validate import MAX_IMPORT_BYTES, TimerError
 
@@ -75,11 +80,13 @@ class MainWindow(QMainWindow):
         self._banner_date = ""
 
         self.setWindowTitle("WorkClock")
-        self.resize(420, 640)
-        self.setMinimumSize(380, 520)
+        self.setMinimumSize(640, 720)
+        self.resize(780, 860)
         geometry = settings.geometry()
         if geometry is not None:
             self.restoreGeometry(geometry)
+        if self.width() < 640 or self.height() < 720:
+            self.resize(max(self.width(), 780), max(self.height(), 860))
 
         self.banner = QWidget()
         self.banner_label = QLabel()
@@ -91,11 +98,13 @@ class MainWindow(QMainWindow):
         banner_row.addWidget(self.banner_label, 1)
         banner_row.addWidget(banner_button)
 
-        self.timer_tab = TimerTab()
+        self.timer_page = TimerPage()
+        self.timer_tab = self.timer_page.stopwatch
+        self.countdown_tab = self.timer_page.countdown
         self.today_tab = TodayTab()
         self.history_tab = HistoryTab()
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.timer_tab, "Timer")
+        self.tabs.addTab(self.timer_page, "Timer")
         self.tabs.addTab(self.today_tab, "Today")
         self.tabs.addTab(self.history_tab, "History")
 
@@ -114,18 +123,28 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(quit_action)
 
+        self.timer_page.settings_clicked.connect(self.open_settings)
+        self.timer_page.projects_clicked.connect(lambda: self._guard(self._change_project))
+        self.timer_tab.delete_lap_clicked.connect(self.delete_lap)
         self.timer_tab.toggle_clicked.connect(self.toggle)
         self.timer_tab.lap_clicked.connect(self.lap)
         self.timer_tab.reset_clicked.connect(self.reset_timer)
         self.timer_tab.add_clicked.connect(self.add_time)
         self.timer_tab.submit_clicked.connect(self.submit_today)
+        self.timer_tab.swap_clicked.connect(self._swap_clock)
+        self.countdown_tab.toggle_clicked.connect(lambda: self._guard(self._toggle_countdown))
+        self.countdown_tab.reset_clicked.connect(lambda: self._guard(self._reset_countdown))
+        self.countdown_tab.duration_changed.connect(self._paint_countdown)
         self.today_tab.add_clicked.connect(self.add_session)
         self.today_tab.edit_clicked.connect(self.edit_session)
         self.today_tab.delete_clicked.connect(self.delete_session)
         self.history_tab.changed.connect(self._fill_history)
         self.history_tab.selection_changed.connect(self._fill_detail)
         self.history_tab.reopen_clicked.connect(self.reopen_selected)
+        self.history_tab.submit_clicked.connect(self.submit_selected)
         self.history_tab.edit_note_clicked.connect(self.edit_log_note)
+        self.history_tab.delete_log_clicked.connect(self.delete_log)
+        self.history_tab.delete_session_clicked.connect(self.delete_history_session)
         self.history_tab.export_summary_clicked.connect(self.export_summary)
         self.history_tab.export_sessions_clicked.connect(self.export_sessions)
         self.tabs.currentChanged.connect(lambda _index: self.refresh())
@@ -138,6 +157,7 @@ class MainWindow(QMainWindow):
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        self._reconcile_countdown()
         self.refresh()
 
     def attach_tray(self, tray: TrayIcon) -> None:
@@ -178,6 +198,15 @@ class MainWindow(QMainWindow):
     def submit_today(self) -> None:
         self._guard(lambda: self._submit(self._today()))
 
+    def submit_selected(self) -> None:
+        self._guard(self._submit_selected)
+
+    def _submit_selected(self) -> None:
+        day = self.history_tab.selected_date()
+        if day is None:
+            raise TimerError("Select a day first.")
+        self._submit(day)
+
     def handle_command(self, command: str) -> None:
         if command == "toggle":
             self.toggle()
@@ -211,7 +240,7 @@ class MainWindow(QMainWindow):
         if submit_key and modifiers & Qt.KeyboardModifier.ControlModifier:
             self.submit_today()
             return True
-        if self._typing():
+        if self._typing(watched):
             return False
         if key == Qt.Key.Key_Space and modifiers == Qt.KeyboardModifier.NoModifier:
             self.toggle()
@@ -235,13 +264,14 @@ class MainWindow(QMainWindow):
 
     def _tick(self) -> None:
         self._ticks += 1
+        self._guard_quiet(self._check_countdown)
         self._paint_time_only()
         if self._ticks % 20 == 0:
             self._guard_quiet(self.service.ensure_midnight)
             self._paint_clock()
             self._paint_banner()
             self._paint_tray()
-            if self.tabs.currentWidget() is self.today_tab and self.service.is_running():
+            if self.service.is_running() and self.tabs.currentWidget() is not self.history_tab:
                 self._fill_today()
         if self._ticks % 100 == 0:
             self.service.touch()
@@ -253,13 +283,17 @@ class MainWindow(QMainWindow):
     def _toggle(self) -> None:
         if self.service.is_running():
             parts = self.service.stop()
+            self._clear_countdown()
             self._held_ms = parts[-1].duration_ms(self.service.now()) if parts else 0
             return
+        self._clear_countdown()
         self.service.start(self.timer_tab.project_text(), self.timer_tab.note_text())
         self._held_ms = 0
         self.timer_tab.clear_note()
 
     def _lap(self) -> None:
+        if self._countdown_running():
+            raise TimerError("Lap is for the stopwatch. Stop the countdown first.")
         if not self.service.is_running():
             return
         self.service.lap()
@@ -270,9 +304,12 @@ class MainWindow(QMainWindow):
             self, "Discard the running session? This time will not be logged."
         ):
             self.service.discard_open()
+            self._clear_countdown()
         self._held_ms = 0
 
     def _add_time(self) -> None:
+        if self._countdown_running():
+            raise TimerError("Stop the countdown before adding time.")
         choice = ask_add_time(self, self.service.is_running())
         if choice is None:
             return
@@ -296,8 +333,14 @@ class MainWindow(QMainWindow):
         existing = self.service.db.get_day(day)
         if not loose and not covers and (existing is None or existing.status != "reopened"):
             raise TimerError("Nothing to submit for that day.")
-        total = sum(session.duration_ms(session.end_ts or 0) for session in loose)
-        count = len(loose)
+        relock = False
+        if existing is not None and existing.status == "reopened" and not loose and not covers:
+            total = existing.total_ms
+            count = existing.session_count
+            relock = True
+        else:
+            total = sum(session.duration_ms(session.end_ts or 0) for session in loose)
+            count = len(loose)
         if covers:
             running = self.service.open_session()
             moment = self.service.now()
@@ -308,13 +351,15 @@ class MainWindow(QMainWindow):
                     if part_date == day:
                         total += part_end - part_start
                         count += 1
-        note = ask_submit(self, day, format_hms(total, centiseconds=False), count)
+        note = ask_submit(self, day, format_hms(total, centiseconds=False), count, relock=relock)
         if note is None:
             return
         if covers:
             self.service.stop()
+            self._clear_countdown()
         self.service.submit_day(day, note)
         self._held_ms = 0
+        self.history_tab.reveal_date(day)
         self.statusBar().showMessage(f"Submitted {day}", 4000)
 
     def _submit_banner(self) -> None:
@@ -377,9 +422,67 @@ class MainWindow(QMainWindow):
         session_id = self.today_tab.selected_id()
         if session_id is None:
             raise TimerError("Select a session first.")
-        if not confirm(self, "Delete this session?"):
+        self._delete_session_id(session_id)
+
+    def delete_lap(self) -> None:
+        self._guard(self._delete_lap)
+
+    def _delete_lap(self) -> None:
+        session_id = self.timer_tab.selected_lap_id()
+        if session_id is None:
+            raise TimerError("Select a lap first.")
+        self._delete_session_id(session_id)
+
+    def delete_history_session(self) -> None:
+        self._guard(self._delete_history_session)
+
+    def _delete_history_session(self) -> None:
+        session_id = self.history_tab.selected_session_id()
+        if session_id is None:
+            raise TimerError("Select a session in the log first.")
+        self._delete_session_id(session_id)
+
+    def delete_log(self) -> None:
+        self._guard(self._delete_log)
+
+    def _delete_log(self) -> None:
+        log_id = self.history_tab.selected_log_id()
+        if log_id is None:
+            raise TimerError("Select a log first.")
+        if not confirm(self, "Delete this log and the sessions inside it?"):
+            return
+        self.service.delete_log(log_id)
+
+    def _delete_session_id(self, session_id: int) -> None:
+        session = self.service.db.get_session(session_id)
+        if session is None:
+            raise TimerError("That session no longer exists.")
+        if session.end_ts is None:
+            if not confirm(self, "Discard this running session? This time will not be logged."):
+                return
+        elif not confirm(self, "Delete this session?"):
             return
         self.service.delete_session(session_id)
+        if session.end_ts is None:
+            self._clear_countdown()
+            self._held_ms = 0
+
+    def _change_project(self) -> None:
+        projects = self.service.projects()
+        if not projects:
+            raise TimerError("There are no projects yet.")
+        choice = ask_project_change(self, projects)
+        if choice is None:
+            return
+        old, new = choice
+        if new is None:
+            if not confirm(self, f"Remove the name {old}? The logged time stays."):
+                return
+        elif new != old and new in projects:
+            if not confirm(self, f"Combine {old} into {new}?"):
+                return
+        count = self.service.rename_project(old, new)
+        self.statusBar().showMessage(f"Updated {count} sessions", 4000)
 
     def reopen_selected(self) -> None:
         self._guard(self._reopen_selected)
@@ -493,14 +596,16 @@ class MainWindow(QMainWindow):
 
     def _fill_today(self) -> None:
         today = self._today()
-        self.today_tab.set_sessions(
-            self.service.today_sessions(today),
-            self.service.tz,
-            self.service.now(),
-            self.settings.centiseconds(),
+        sessions = self.service.today_sessions(today)
+        now = self.service.now()
+        self.today_tab.set_sessions(sessions, self.service.tz, now, self.settings.centiseconds())
+        self.timer_tab.set_laps(
+            _lap_lines(sessions, self.service.tz, now, self.settings.clock_format())
         )
+        self.countdown_tab.set_projects(self.service.recent_projects())
 
     def _fill_history(self) -> None:
+        self.history_tab.follow_today(self._today_date())
         start, end = self.history_tab.date_range()
         project = self.history_tab.project()
         self.history_tab.set_projects(self.service.projects())
@@ -550,24 +655,32 @@ class MainWindow(QMainWindow):
         return [(short_day(day), total) for day, total in totals]
 
     def _paint_time_only(self) -> None:
+        style = self.settings.clock_format()
         running = self.service.running_elapsed_ms()
         elapsed = self._held_ms if running is None else running
-        clock = format_hms(elapsed, centiseconds=self.settings.centiseconds())
-        self.timer_tab.display.setText(clock)
+        segment = format_elapsed(elapsed, style)
+        total = format_elapsed(self.service.total_on(self._today(), None), style)
+        if self.settings.primary_is_total():
+            primary, secondary = total, f"Lap {segment}"
+        else:
+            primary, secondary = segment, f"Today {total}"
+        self.timer_tab.show_clock(primary, flip=style == "hm")
+        self.timer_tab.today.setText(secondary)
         self.timer_tab.toggle_button.setText("Stop" if running is not None else "Start")
-        self.timer_tab.lap_button.setEnabled(running is not None)
+        self.timer_tab.lap_button.setEnabled(running is not None and not self._countdown_running())
+        self._paint_countdown()
 
     def _paint_clock(self) -> None:
         self._paint_time_only()
         running = self.service.is_running()
-        today_total = self.service.total_on(self._today(), None)
-        self.timer_tab.today.setText(f"Today {format_hms(today_total, centiseconds=False)}")
-        self.timer_tab.lap_button.setEnabled(running)
+        self.timer_tab.lap_button.setEnabled(running and not self._countdown_running())
         self.timer_tab.set_projects(self.service.recent_projects())
+        self.countdown_tab.set_projects(self.service.recent_projects())
         target = self.settings.target_hours()
         if target <= 0:
             self.timer_tab.set_progress(None, "")
             return
+        today_total = self.service.total_on(self._today(), None)
         goal = int(target * 3_600_000)
         value = min(1000, int(today_total * 1000 / goal)) if goal else 0
         self.timer_tab.set_progress(value, f"{decimal_hours(today_total)} / {target:.2f} h")
@@ -593,7 +706,7 @@ class MainWindow(QMainWindow):
         if running is None:
             self._tray.set_running(False, "WorkClock — stopped")
             return
-        clock = format_hms(running, centiseconds=False)
+        clock = format_elapsed(running, self.settings.clock_format())
         self._tray.set_running(True, f"WorkClock — running {clock}")
 
     def _check_idle(self) -> None:
@@ -679,11 +792,139 @@ class MainWindow(QMainWindow):
         self.settings.set_geometry(self.saveGeometry())
         self.settings.sync()
 
-    def _typing(self) -> bool:
-        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit, QPlainTextEdit, QTextEdit
+    def _typing(self, watched: QObject) -> bool:
+        from PySide6.QtWidgets import (
+            QAbstractSpinBox,
+            QComboBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
 
-        widget = QApplication.focusWidget()
-        return isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox))
+        widgets: list[QWidget] = []
+        if isinstance(watched, QWidget):
+            widgets.append(watched)
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QWidget) and focus not in widgets:
+            widgets.append(focus)
+        for start in widgets:
+            widget: QWidget | None = start
+            while widget is not None:
+                if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                    return True
+                if isinstance(widget, QComboBox) and widget.isEditable():
+                    return True
+                widget = widget.parentWidget()
+            if self._combo_popup(start):
+                return True
+        return False
+
+    def _combo_popup(self, widget: QWidget) -> bool:
+        combos = (
+            self.timer_tab.project,
+            self.countdown_tab.project,
+            self.history_tab.project_box,
+        )
+        for combo in combos:
+            view = combo.view()
+            if view is None or not view.isVisible():
+                continue
+            if widget is view or view.isAncestorOf(widget) or widget.window() is view.window():
+                return True
+        return False
+
+    def _countdown_running(self) -> bool:
+        return self.settings.countdown_end() > 0 and self.service.is_running()
+
+    def _swap_clock(self) -> None:
+        self.settings.set_primary_is_total(not self.settings.primary_is_total())
+        self.settings.sync()
+        self._paint_time_only()
+
+    def _toggle_countdown(self) -> None:
+        if self._countdown_running():
+            self._stop_countdown()
+            return
+        self._start_countdown()
+
+    def _start_countdown(self) -> None:
+        if self.service.is_running():
+            raise TimerError("Stop the timer before starting a countdown.")
+        duration = self.countdown_tab.duration_ms()
+        if duration < 1000:
+            raise TimerError("Set the countdown to at least one second.")
+        if duration > 24 * 60 * 60 * 1000:
+            raise TimerError("A countdown can't be longer than 24 hours.")
+        session = self.service.start(
+            self.countdown_tab.project_text(),
+            self.countdown_tab.note_text(),
+        )
+        self.settings.set_countdown(session.start_ts + duration, duration)
+        self.settings.sync()
+        self.countdown_tab.clear_note()
+        self._held_ms = 0
+
+    def _stop_countdown(self) -> None:
+        if self.service.is_running():
+            parts = self.service.stop()
+            self._held_ms = parts[-1].duration_ms(self.service.now()) if parts else 0
+        self._clear_countdown()
+
+    def _reset_countdown(self) -> None:
+        if self._countdown_running():
+            if not confirm(self, "Discard this countdown? The time will not be logged."):
+                return
+            self.service.discard_open()
+            self._held_ms = 0
+        self._clear_countdown()
+        self.countdown_tab.finished = False
+
+    def _clear_countdown(self) -> None:
+        if self.settings.countdown_end() == 0 and self.settings.countdown_duration() == 0:
+            return
+        self.settings.clear_countdown()
+        self.settings.sync()
+
+    def _check_countdown(self) -> None:
+        end = self.settings.countdown_end()
+        if end <= 0:
+            return
+        if not self.service.is_running():
+            self._clear_countdown()
+            return
+        if self.service.now() < end:
+            return
+        self.service.stop_at(end)
+        self._clear_countdown()
+        self._held_ms = 0
+        self.countdown_tab.show_done()
+        ring()
+        if self._tray is not None:
+            self._tray.notify("Countdown finished", "It reached zero and was logged.")
+
+    def _reconcile_countdown(self) -> None:
+        self._check_countdown()
+
+    def _paint_countdown(self) -> None:
+        style = self.settings.clock_format()
+        end = self.settings.countdown_end()
+        running = self._countdown_running()
+        done = self.countdown_tab.finished and not running
+        if running:
+            remaining = max(0, end - self.service.now())
+            duration = self.settings.countdown_duration()
+            fraction = remaining / duration if duration else 0.0
+            text = format_elapsed(remaining, style)
+        else:
+            fraction = 0.0 if done else 1.0
+            text = format_elapsed(0 if done else self.countdown_tab.duration_ms(), style)
+        self.countdown_tab.set_time(
+            text,
+            fraction,
+            flip=style == "hm" and not done,
+            running=running,
+            done=done,
+        )
 
     def _guard(self, action: Callable[[], None]) -> None:
         try:
@@ -697,6 +938,23 @@ class MainWindow(QMainWindow):
             action()
         except TimerError as exc:
             self.statusBar().showMessage(str(exc), 4000)
+
+
+def _lap_lines(
+    sessions: list[Session], tz: tzinfo, now_ms: int, style: str
+) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    total = len(sessions)
+    for offset, session in enumerate(reversed(sessions)):
+        number = total - offset
+        duration = format_elapsed(session.duration_ms(now_ms), style)
+        start = format_clock(session.start_ts, tz)
+        if session.end_ts is None:
+            span = f"{start} – running"
+        else:
+            span = f"{start} – {format_clock(session.end_ts, tz)}"
+        lines.append((session.id, f"Lap {number}    {duration}    {span}"))
+    return lines
 
 
 def _sum(points: list[tuple[str, int]]) -> int:

@@ -53,6 +53,14 @@ def format_hms(ms: int, *, centiseconds: bool = True) -> str:
     return base
 
 
+def format_elapsed(ms: int, style: str) -> str:
+    if style == "hm":
+        return format_hhmm(ms)
+    if style == "hms":
+        return format_hms(ms, centiseconds=False)
+    return format_hms(ms, centiseconds=True)
+
+
 def format_hhmm(ms: int) -> str:
     if ms < 0:
         ms = 0

@@ -180,6 +180,19 @@ class Database:
     def delete_session(self, session_id: int) -> None:
         self._conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
 
+    def sessions_with_project(self, project: str) -> list[Session]:
+        rows = self._conn.execute(
+            "SELECT * FROM sessions WHERE project = ? ORDER BY start_ts, id",
+            (project,),
+        ).fetchall()
+        return [_session(row) for row in rows]
+
+    def set_project_name(self, old: str, new: str | None) -> None:
+        self._conn.execute(
+            "UPDATE sessions SET project = ? WHERE project = ?",
+            (new, old),
+        )
+
     def set_submission(self, session_id: int, submission_id: int) -> None:
         self._conn.execute(
             "UPDATE sessions SET submission_id = ? WHERE id = ?",
