@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSettings
@@ -34,6 +35,41 @@ class Settings:
 
     def set_target_hours(self, value: float) -> None:
         self._store.setValue("target_hours", float(value))
+
+    def project_targets(self) -> dict[str, float]:
+        """Daily target hours per project name."""
+        value = self._store.value("project_targets", "")
+        if not isinstance(value, str) or not value:
+            return {}
+        try:
+            raw = json.loads(value)
+        except ValueError:
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        targets: dict[str, float] = {}
+        for name, hours in raw.items():
+            if not isinstance(name, str) or not name or len(name) > 100:
+                continue
+            number = _bounded_float(hours, 0, 24, 0)
+            if number > 0:
+                targets[name] = number
+        return targets
+
+    def set_project_targets(self, targets: dict[str, float]) -> None:
+        kept = {name: float(hours) for name, hours in targets.items() if hours > 0}
+        self._store.setValue("project_targets", json.dumps(kept, ensure_ascii=False))
+
+    def target_weekdays(self) -> frozenset[int]:
+        """Weekdays the targets apply to. Monday is 0."""
+        value = self._store.value("target_weekdays", "0,1,2,3,4")
+        if not isinstance(value, str):
+            return frozenset({0, 1, 2, 3, 4})
+        days = {int(part) for part in value.split(",") if part.strip().isdigit()}
+        return frozenset(day for day in days if 0 <= day <= 6)
+
+    def set_target_weekdays(self, days: frozenset[int]) -> None:
+        self._store.setValue("target_weekdays", ",".join(str(day) for day in sorted(days)))
 
     def still_working_hours(self) -> float:
         return _bounded_float(self._store.value("still_working_hours", 0), 0, 24, 0)

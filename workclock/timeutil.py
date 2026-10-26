@@ -145,8 +145,23 @@ def months_between(first: str, last: str) -> list[str]:
     return labels
 
 
+def dates_between(first: str, last: str) -> list[str]:
+    start = date.fromisoformat(first)
+    end = date.fromisoformat(last)
+    labels: list[str] = []
+    cursor = start
+    while cursor <= end and len(labels) < 40_000:
+        labels.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return labels
+
+
 def short_day(iso: str) -> str:
     return date.fromisoformat(iso).strftime("%d %b")
+
+
+def short_month(iso: str) -> str:
+    return date.fromisoformat(iso).strftime("%b %Y")
 
 
 def _dates(start: date, end: date) -> list[str]:

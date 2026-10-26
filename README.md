@@ -34,15 +34,17 @@ That menu action runs `workclock --toggle`. If WorkClock is already open, the ru
 
 ## In the app
 
-- **Space** starts or stops the stopwatch. **L** records a lap. **Ctrl+Enter** submits today. Those keys stay out of the way while you are typing, including in the project box.
+- **Space** starts or stops the stopwatch. **Ctrl+Enter** submits today. Those keys stay out of the way while you are typing, including in the project box.
 - The **⇅** button at the top right of the stopwatch swaps the big time and the smaller one, so the day total can be the large clock.
 - **Settings** on the Timer page chooses the clock: hours and minutes (a flip clock), with seconds, or with centiseconds. It also has the idle prompt (off by default), daily target, reminders, starting in the tray, and launching at login.
 - **Countdown** is the other page on Timer. Set a duration, start it, and it counts down on a dial. At zero it rings, logs the session, and stops. Stopping early logs only the time that actually ran.
-- **Add time** puts missed minutes on the running stopwatch, or records them as finished time.
+- **Add time** is for when you forgot to start. If the timer is stopped, enter how long you have already worked (or tap 5 min, 15 min, 30 min, 1 h). The timer starts at that amount, so you never have to work out a start time. If the timer is running, the time is added to the running session instead. You can also log the time as finished.
+- **Add session** on Today suggests the hour before now (or before the running timer), and never overlaps earlier work. Changing **Duration** moves the start.
 - Closing the window hides WorkClock in the system tray. **Quit** in the tray menu exits.
 - A second submit on the same date merges into that day's total and keeps a separate log, with its own start, finish, and note.
-- History has **Submit day** and **Reopen day**. Reopen unlocks a day; Submit day locks it again. After a submit, that day is selected so its log shows immediately.
-- History charts cover 7 days, 14 days, the current month, and all time (one point per month).
+- In History, the range (last 7, 14, or 30 days, this month, all time, or custom dates) and the project filter apply to the chart, the day list, the logs, and the exports. **All time** starts on the first day the project was logged. Short ranges show one point per day; longer ones show weeks, then months.
+- **Edit…** in History (or double-click a log) opens the log in its own window. Change any session's start, end, duration, project, or note, then click **Update session**. You can also add or remove sessions and edit the log note. **Submit log** saves everything at once. Cancel discards it.
+- **Insights** shows today against your daily targets (hours left per project), the total, average per week, and average per worked day. It also shows how often the target was met, your streak, and your typical start and stop time. Charts show time by project, hours by project over time, and an hour-by-weekday heatmap of when you work. Set targets with **Targets…**, per project and overall, and choose which weekdays they count on.
 
 ## Publish on Flathub
 

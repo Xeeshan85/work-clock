@@ -241,6 +241,25 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def overlapping_ids(self, start_ts: int, end_ts: int) -> set[int]:
+        rows = self._conn.execute(
+            """
+            SELECT id FROM sessions
+            WHERE start_ts < ? AND COALESCE(end_ts, ?) > ?
+            """,
+            (end_ts, _FAR, start_ts),
+        ).fetchall()
+        return {_int(row, "id") for row in rows}
+
+    def first_date(self, project: str | None) -> str | None:
+        row = self._conn.execute(
+            "SELECT MIN(date) FROM sessions WHERE ? IS NULL OR project = ?",
+            (project, project),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return check_date(row[0])
+
     def recent_projects(self, limit: int = 8) -> list[str]:
         rows = self._conn.execute(
             """

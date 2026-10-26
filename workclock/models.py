@@ -49,7 +49,6 @@ class DaySummary:
     total_ms: int
     session_count: int
     log_count: int
-    status: str
 
 
 @dataclass(frozen=True)
@@ -60,3 +59,14 @@ class LogDetail:
     end_ts: int
     total_ms: int
     sessions: tuple[Session, ...]
+
+
+@dataclass(frozen=True)
+class SessionEdit:
+    """A session as the log editor wants it saved. id is None for a new one."""
+
+    id: int | None
+    start_ts: int
+    end_ts: int
+    project: str | None
+    note: str | None

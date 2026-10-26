@@ -24,13 +24,15 @@ from workclock.models import DaySummary, LogDetail, Session
 from workclock.timeutil import format_clock, format_hhmm, format_hms
 from workclock.ui.chart import LineChart
 
+RANGES = ("Last 7 days", "Last 14 days", "Last 30 days", "This month", "All time", "Custom")
+CUSTOM = "Custom"
+
 
 class HistoryTab(QWidget):
     changed = Signal()
     selection_changed = Signal()
-    reopen_clicked = Signal()
     submit_clicked = Signal()
-    edit_note_clicked = Signal()
+    edit_clicked = Signal()
     delete_log_clicked = Signal()
     delete_session_clicked = Signal()
     export_summary_clicked = Signal()
@@ -42,8 +44,9 @@ class HistoryTab(QWidget):
         self.project_box = QComboBox()
         self.project_box.addItem("All projects")
         self.range_box = QComboBox()
-        self.range_box.addItems(["7 days", "14 days", "Month", "All time"])
-        self.start_date = QDateEdit(QDate(today.year, today.month, today.day).addDays(-30))
+        self.range_box.addItems(list(RANGES))
+        self.range_box.setCurrentText("Last 30 days")
+        self.start_date = QDateEdit(QDate(today.year, today.month, today.day).addDays(-29))
         self.end_date = QDateEdit(QDate(today.year, today.month, today.day))
         for edit in (self.start_date, self.end_date):
             edit.setCalendarPopup(True)
@@ -51,14 +54,10 @@ class HistoryTab(QWidget):
         self.chart = LineChart()
         self.summary = QLabel("")
         self.summary.setWordWrap(True)
-        self._follow_end = True
-        self._today = today
         self._prefer: str | None = None
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(
-            ["Date", "Hours", "Decimal", "Sessions", "Logs", "Status"]
-        )
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Date", "Hours", "Decimal", "Sessions", "Logs"])
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -68,17 +67,17 @@ class HistoryTab(QWidget):
         self.detail = QTreeWidget()
         self.detail.setHeaderLabels(["Start – end", "Duration", "Note"])
         self.detail.setColumnCount(3)
+        self.detail.itemDoubleClicked.connect(lambda _item, _column: self.edit_clicked.emit())
 
         self.submit_button = QPushButton("Submit day")
-        self.reopen_button = QPushButton("Reopen day")
-        self.note_button = QPushButton("Edit log note")
+        self.edit_button = QPushButton("Edit…")
+        self.edit_button.setToolTip("Edit the selected log, or the selected unsubmitted session")
         self.delete_log_button = QPushButton("Delete log")
         self.delete_session_button = QPushButton("Delete session")
         summary_button = QPushButton("Export summary")
         sessions_button = QPushButton("Export sessions")
         self.submit_button.clicked.connect(self.submit_clicked)
-        self.reopen_button.clicked.connect(self.reopen_clicked)
-        self.note_button.clicked.connect(self.edit_note_clicked)
+        self.edit_button.clicked.connect(self.edit_clicked)
         self.delete_log_button.clicked.connect(self.delete_log_clicked)
         self.delete_session_button.clicked.connect(self.delete_session_clicked)
         summary_button.clicked.connect(self.export_summary_clicked)
@@ -94,8 +93,7 @@ class HistoryTab(QWidget):
 
         actions = QHBoxLayout()
         actions.addWidget(self.submit_button)
-        actions.addWidget(self.reopen_button)
-        actions.addWidget(self.note_button)
+        actions.addWidget(self.edit_button)
         actions.addWidget(self.delete_log_button)
         actions.addWidget(self.delete_session_button)
         actions.addWidget(summary_button)
@@ -111,47 +109,53 @@ class HistoryTab(QWidget):
 
         self.project_box.currentIndexChanged.connect(self.changed)
         self.range_box.currentIndexChanged.connect(self.changed)
-        self.start_date.dateChanged.connect(self.changed)
-        self.end_date.dateChanged.connect(self._end_date_changed)
+        self.start_date.dateChanged.connect(self._dates_edited)
+        self.end_date.dateChanged.connect(self._dates_edited)
         self.table.itemSelectionChanged.connect(self.selection_changed)
 
     def project(self) -> str | None:
         text = self.project_box.currentText()
         return None if text == "All projects" or text == "" else text
 
-    def chart_range(self) -> str:
+    def range_choice(self) -> str:
         return self.range_box.currentText()
 
-    def follow_today(self, today: date) -> None:
-        self._today = today
-        if not self._follow_end:
-            return
-        target = QDate(today.year, today.month, today.day)
-        if self.end_date.date() < target:
-            self.end_date.blockSignals(True)
-            self.end_date.setDate(target)
-            self.end_date.blockSignals(False)
+    def set_range(self, start: str, end: str) -> None:
+        """Show a preset's dates without turning the range into Custom."""
+        for edit, value in ((self.start_date, start), (self.end_date, end)):
+            shown = QDate.fromString(value, Qt.DateFormat.ISODate)
+            if shown.isValid() and edit.date() != shown:
+                edit.blockSignals(True)
+                edit.setDate(shown)
+                edit.blockSignals(False)
 
     def reveal_date(self, day: str) -> None:
         shown = QDate.fromString(day, Qt.DateFormat.ISODate)
         if not shown.isValid():
             return
-        today = QDate(self._today.year, self._today.month, self._today.day)
-        if self.end_date.date() < shown:
-            self.end_date.blockSignals(True)
-            self.end_date.setDate(shown)
-            self.end_date.blockSignals(False)
-            self._follow_end = shown >= today
-        if self.start_date.date() > shown:
-            self.start_date.blockSignals(True)
-            self.start_date.setDate(shown)
-            self.start_date.blockSignals(False)
         self._prefer = day
+        if self.start_date.date() <= shown <= self.end_date.date():
+            return
+        self._set_custom()
+        for edit, outside in (
+            (self.end_date, self.end_date.date() < shown),
+            (self.start_date, self.start_date.date() > shown),
+        ):
+            if outside:
+                edit.blockSignals(True)
+                edit.setDate(shown)
+                edit.blockSignals(False)
 
-    def _end_date_changed(self) -> None:
-        today = QDate(self._today.year, self._today.month, self._today.day)
-        self._follow_end = self.end_date.date() >= today
+    def _dates_edited(self) -> None:
+        self._set_custom()
         self.changed.emit()
+
+    def _set_custom(self) -> None:
+        if self.range_box.currentText() == CUSTOM:
+            return
+        self.range_box.blockSignals(True)
+        self.range_box.setCurrentText(CUSTOM)
+        self.range_box.blockSignals(False)
 
     def date_range(self) -> tuple[str, str]:
         return (
@@ -172,8 +176,8 @@ class HistoryTab(QWidget):
     def set_summary(self, text: str) -> None:
         self.summary.setText(text)
 
-    def set_chart(self, points: list[tuple[str, int]]) -> None:
-        self.chart.set_points(points)
+    def set_chart(self, points: list[tuple[str, int]], target_ms: int = 0) -> None:
+        self.chart.set_points(points, target_ms)
 
     def set_rows(self, rows: list[DaySummary]) -> None:
         preferred = self._prefer
@@ -188,7 +192,6 @@ class HistoryTab(QWidget):
                 f"{row.total_ms / 3_600_000:.2f}",
                 str(row.session_count),
                 str(row.log_count),
-                row.status,
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -237,18 +240,28 @@ class HistoryTab(QWidget):
         loose: list[Session],
         tz: tzinfo,
         now_ms: int,
+        project: str | None = None,
     ) -> None:
+        """Show a day's logs. With a project, only that project's sessions."""
         self.detail.clear()
+        if project is not None:
+            loose = [session for session in loose if session.project == project]
         for log in logs:
+            members = log.sessions
+            if project is not None:
+                members = tuple(session for session in members if session.project == project)
+                if not members:
+                    continue
+            total = sum(session.duration_ms(now_ms) for session in members)
             parent = QTreeWidgetItem(
                 [
                     f"{format_clock(log.start_ts, tz)} – {format_clock(log.end_ts, tz)}",
-                    format_hhmm(log.total_ms),
+                    format_hhmm(total),
                     log.note or "",
                 ]
             )
             parent.setData(0, Qt.ItemDataRole.UserRole, log.id)
-            for session in log.sessions:
+            for session in members:
                 end = session.end_ts
                 end_text = "running" if end is None else format_clock(end, tz)
                 child = QTreeWidgetItem(

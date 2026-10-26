@@ -1,6 +1,6 @@
 [project]
 name = "workclock"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local work-hours stopwatch and daily log"
 readme = "README.md"
 license = {text = "MIT"}

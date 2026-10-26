@@ -7,7 +7,7 @@ from collections.abc import Callable
 from datetime import tzinfo
 
 from workclock.db import Database
-from workclock.models import Day, DaySummary, LogDetail, Session, Submission
+from workclock.models import Day, DaySummary, LogDetail, Session, SessionEdit, Submission
 from workclock.timeutil import (
     local_date,
     months_between,
@@ -72,23 +72,6 @@ class TimerService:
         session = self.db.get_open_session()
         if session is not None:
             self.db.delete_session(session.id)
-
-    def lap(self) -> None:
-        session = self._require_open()
-        moment = self.now()
-        if moment <= session.start_ts:
-            return
-        project = session.project
-        with self.db.transaction():
-            self._close(session, moment)
-            self.db.insert_session(
-                date=local_date(moment, self.tz),
-                start_ts=moment,
-                end_ts=None,
-                project=project,
-                note=None,
-                last_seen_ts=moment,
-            )
 
     def touch(self) -> None:
         session = self.db.get_open_session()
@@ -185,7 +168,6 @@ class TimerService:
                 raise TimerError("That session no longer exists.")
             if session.end_ts is None:
                 raise TimerError("Stop the timer before editing that session.")
-            self._require_editable(session)
             if start_day != session.date or end_day != session.date:
                 raise TimerError("Keep the session inside its original day.")
             if self.db.has_overlap(start_ts, end_ts, session.id):
@@ -257,45 +239,94 @@ class TimerService:
                 for session in self.db.sessions_on(day_date)
                 if session.submission_id is None and session.end_ts is not None
             ]
-            day = self.db.get_day(day_date)
-            if not loose and (day is None or day.status != "reopened"):
+            if not loose:
                 raise TimerError("Nothing to submit for that day.")
+            day = self.db.get_day(day_date)
             if day is None:
                 day = self.db.insert_day(day_date, "submitted")
             elif day.status != "submitted":
                 self.db.update_day(day.id, day.total_ms, day.session_count, "submitted")
-            if loose:
-                self._attach_log(day, loose, note, moment)
+            self._attach_log(day, loose, note, moment)
             self._recompute_day(day.date)
             saved = self.db.get_day(day.date)
             if saved is None:
                 raise TimerError("Could not submit that day.")
             return saved
 
-    def reopen_day(self, day_date: str) -> None:
-        day = self.db.get_day(day_date)
-        if day is None:
-            raise TimerError("That day has not been submitted.")
-        if day.status == "reopened":
-            return
-        self.db.update_day(day.id, day.total_ms, day.session_count, "reopened")
-
-    def update_log_note(self, submission_id: int, note: str | None) -> None:
+    def edit_log(self, submission_id: int, note: str | None, sessions: list[SessionEdit]) -> None:
+        """Replace a submitted log's note and sessions in one step."""
+        if not sessions:
+            raise TimerError("A log needs at least one session. Delete the log instead.")
+        moment = self.now()
         with self.db.transaction():
             submission = self.db.get_submission(submission_id)
             if submission is None:
                 raise TimerError("That log no longer exists.")
             day = self._day_for_submission(submission)
-            if day.status != "reopened":
-                raise TimerError("Reopen that day before changing its logs.")
+            current = {
+                session.id: session
+                for session in self.db.sessions_on(day.date)
+                if session.submission_id == submission_id
+            }
+            spans: list[tuple[int, int]] = []
+            for edit in sessions:
+                if edit.id is not None and edit.id not in current:
+                    raise TimerError("A session in that log no longer exists.")
+                if edit.end_ts <= edit.start_ts:
+                    raise TimerError("Each session must end after it starts.")
+                if edit.end_ts > moment + 60_000:
+                    raise TimerError("Session times can't be in the future.")
+                start_day = local_date(edit.start_ts, self.tz)
+                end_day = local_date(edit.end_ts - 1, self.tz)
+                if start_day != day.date or end_day != day.date:
+                    raise TimerError(f"Keep every session inside {day.date}.")
+                spans.append((edit.start_ts, edit.end_ts))
+            spans.sort()
+            for (_first_start, first_end), (second_start, _second_end) in zip(
+                spans, spans[1:], strict=False
+            ):
+                if second_start < first_end:
+                    raise TimerError("Two sessions in that log overlap.")
+            for start_ts, end_ts in spans:
+                if self.db.overlapping_ids(start_ts, end_ts) - set(current):
+                    raise TimerError("That time overlaps another session.")
+            kept = {edit.id for edit in sessions if edit.id is not None}
+            for session_id in set(current) - kept:
+                self.db.delete_session(session_id)
+            for edit in sessions:
+                if edit.id is None:
+                    self.db.insert_session(
+                        date=day.date,
+                        start_ts=edit.start_ts,
+                        end_ts=edit.end_ts,
+                        project=edit.project,
+                        note=edit.note,
+                        submission_id=submission_id,
+                        last_seen_ts=edit.end_ts,
+                    )
+                    continue
+                self.db.update_session(
+                    Session(
+                        id=edit.id,
+                        date=day.date,
+                        start_ts=edit.start_ts,
+                        end_ts=edit.end_ts,
+                        project=edit.project,
+                        note=edit.note,
+                        submission_id=submission_id,
+                        last_seen_ts=edit.end_ts,
+                    )
+                )
             self.db.update_submission_note(submission_id, note)
+            self._recompute_day(day.date)
 
     def today_sessions(self, day_date: str) -> list[Session]:
-        sessions = self.db.sessions_on(day_date)
-        day = self.db.get_day(day_date)
-        if day is not None and day.status == "submitted":
-            return [session for session in sessions if session.submission_id is None]
-        return sessions
+        return [
+            session for session in self.db.sessions_on(day_date) if session.submission_id is None
+        ]
+
+    def first_date(self, project: str | None) -> str | None:
+        return self.db.first_date(project)
 
     def total_on(self, day_date: str, project: str | None, moment: int | None = None) -> int:
         now = self.now() if moment is None else moment
@@ -326,7 +357,6 @@ class TimerService:
                         total_ms=day.total_ms,
                         session_count=day.session_count,
                         log_count=len(self.db.submissions_for(day.id)),
-                        status=day.status,
                     )
                 )
                 continue
@@ -342,7 +372,6 @@ class TimerService:
                     total_ms=total,
                     session_count=len(linked),
                     log_count=len(log_ids),
-                    status=day.status,
                 )
             )
         return rows
@@ -630,13 +659,6 @@ class TimerService:
         if session is None:
             raise TimerError("The timer is not running.")
         return session
-
-    def _require_editable(self, session: Session) -> None:
-        if session.submission_id is None:
-            return
-        day = self.db.get_day(session.date)
-        if day is None or day.status != "reopened":
-            raise TimerError("Reopen that day before changing its logged sessions.")
 
     def covers_date(self, day_date: str) -> bool:
         session = self.db.get_open_session()

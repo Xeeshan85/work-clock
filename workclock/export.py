@@ -53,7 +53,7 @@ class IncomingDay:
 def summary_csv(rows: list[DaySummary]) -> str:
     buffer = StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(["date", "total_hhmm", "decimal_hours", "session_count", "log_count", "status"])
+    writer.writerow(["date", "total_hhmm", "decimal_hours", "session_count", "log_count"])
     for row in rows:
         writer.writerow(
             [
@@ -62,7 +62,6 @@ def summary_csv(rows: list[DaySummary]) -> str:
                 decimal_hours(row.total_ms),
                 row.session_count,
                 row.log_count,
-                _cell(row.status),
             ]
         )
     return buffer.getvalue()

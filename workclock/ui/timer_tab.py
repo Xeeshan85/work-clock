@@ -70,12 +70,11 @@ class StopwatchDisplay(QLabel):
 
 class TimerTab(QWidget):
     toggle_clicked = Signal()
-    lap_clicked = Signal()
     reset_clicked = Signal()
     add_clicked = Signal()
     submit_clicked = Signal()
     swap_clicked = Signal()
-    delete_lap_clicked = Signal()
+    delete_session_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -103,13 +102,13 @@ class TimerTab(QWidget):
         self.progress.hide()
         self.progress_label.hide()
 
-        self.laps = QListWidget()
-        self.laps.setAlternatingRowColors(True)
-        self.laps.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self.laps.setMinimumHeight(96)
-        self._lap_rows: list[tuple[int, str]] = []
-        self.delete_lap_button = QPushButton("Delete lap")
-        self.delete_lap_button.clicked.connect(self.delete_lap_clicked)
+        self.sessions = QListWidget()
+        self.sessions.setAlternatingRowColors(True)
+        self.sessions.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.sessions.setMinimumHeight(96)
+        self._session_rows: list[tuple[int, str]] = []
+        self.delete_session_button = QPushButton("Delete session")
+        self.delete_session_button.clicked.connect(self.delete_session_clicked)
 
         self.project = QComboBox()
         self.project.setEditable(True)
@@ -118,27 +117,23 @@ class TimerTab(QWidget):
         self.note.setPlaceholderText("Note for the next session")
 
         self.toggle_button = QPushButton("Start")
-        self.lap_button = QPushButton("Lap")
         self.reset_button = QPushButton("Reset")
         self.add_button = QPushButton("Add time")
         self.submit_button = QPushButton("Submit day")
         self.toggle_button.setToolTip("Space")
-        self.lap_button.setToolTip("L")
+        self.add_button.setToolTip("Forgot to start? Add the minutes you already worked")
         self.submit_button.setToolTip("Ctrl+Enter")
-        self.lap_button.setEnabled(False)
-        for button in (self.toggle_button, self.lap_button, self.reset_button):
+        for button in (self.toggle_button, self.reset_button):
             button.setMinimumHeight(44)
 
         self.toggle_button.clicked.connect(self.toggle_clicked)
-        self.lap_button.clicked.connect(self.lap_clicked)
         self.reset_button.clicked.connect(self.reset_clicked)
         self.add_button.clicked.connect(self.add_clicked)
         self.submit_button.clicked.connect(self.submit_clicked)
 
         buttons = QHBoxLayout()
-        buttons.addWidget(self.toggle_button)
-        buttons.addWidget(self.lap_button)
-        buttons.addWidget(self.reset_button)
+        buttons.addWidget(self.toggle_button, 2)
+        buttons.addWidget(self.reset_button, 1)
         extra = QHBoxLayout()
         extra.addWidget(self.add_button)
         extra.addWidget(self.submit_button)
@@ -163,8 +158,8 @@ class TimerTab(QWidget):
         layout.addWidget(self.today)
         layout.addWidget(self.progress)
         layout.addWidget(self.progress_label)
-        layout.addWidget(self.laps, 1)
-        layout.addWidget(self.delete_lap_button)
+        layout.addWidget(self.sessions, 1)
+        layout.addWidget(self.delete_session_button)
         layout.addLayout(form)
         layout.addLayout(buttons)
         layout.addLayout(extra)
@@ -173,7 +168,6 @@ class TimerTab(QWidget):
         self.show_clock(clock, flip=False)
         self.today.setText(today)
         self.toggle_button.setText("Stop" if running else "Start")
-        self.lap_button.setEnabled(running)
 
     def show_clock(self, text: str, *, flip: bool) -> None:
         target = self.flip if flip else self.display
@@ -184,26 +178,26 @@ class TimerTab(QWidget):
         else:
             self.display.setText(text)
 
-    def set_laps(self, rows: list[tuple[int, str]]) -> None:
-        if rows == self._lap_rows:
+    def set_sessions(self, rows: list[tuple[int, str]]) -> None:
+        if rows == self._session_rows:
             return
-        selected = self.selected_lap_id()
-        self._lap_rows = rows
-        self.laps.clear()
+        selected = self.selected_session_id()
+        self._session_rows = rows
+        self.sessions.clear()
         for session_id, line in rows:
             item = QListWidgetItem(line)
             item.setData(Qt.ItemDataRole.UserRole, session_id)
-            self.laps.addItem(item)
+            self.sessions.addItem(item)
         if selected is None:
             return
-        for index in range(self.laps.count()):
-            found = self.laps.item(index)
+        for index in range(self.sessions.count()):
+            found = self.sessions.item(index)
             if found is not None and found.data(Qt.ItemDataRole.UserRole) == selected:
-                self.laps.setCurrentRow(index)
+                self.sessions.setCurrentRow(index)
                 return
 
-    def selected_lap_id(self) -> int | None:
-        item = self.laps.currentItem()
+    def selected_session_id(self) -> int | None:
+        item = self.sessions.currentItem()
         if item is None:
             return None
         value = item.data(Qt.ItemDataRole.UserRole)

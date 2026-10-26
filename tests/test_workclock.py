@@ -1,4 +1,4 @@
-"""Elapsed time, crash recovery, midnight split, submit/reopen, and export."""
+"""Elapsed time, crash recovery, midnight split, submit and log edits, and export."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import pytest
 
 from workclock.db import Database
 from workclock.export import dumps, loads, restore, sessions_csv, summary_csv
+from workclock.models import SessionEdit
 from workclock.timer_service import TimerService
 from workclock.timeutil import format_elapsed, format_hms, split_span, to_ms
 from workclock.validate import TimerError
@@ -177,25 +178,73 @@ def test_same_day_submissions_merge_and_keep_separate_logs(svc: TimerService, cl
     assert svc.today_sessions("2026-10-06") == []
 
 
-def test_reopen_allows_edit_and_resubmit_keeps_both_logs(svc: TimerService, clock: Clock) -> None:
+def test_submitted_log_can_be_edited_in_place(svc: TimerService, clock: Clock) -> None:
     clock.value = at(2026, 10, 6, 18, 0)
-    session = svc.add_manual(at(2026, 10, 6, 9, 0), at(2026, 10, 6, 10, 0), None, None)[0]
+    first = svc.add_manual(at(2026, 10, 6, 9, 0), at(2026, 10, 6, 10, 0), "ops", None)[0]
+    second = svc.add_manual(at(2026, 10, 6, 10, 0), at(2026, 10, 6, 11, 0), "ops", None)[0]
     svc.submit_day("2026-10-06", "once")
+    log = svc.day_logs("2026-10-06")[0]
+
+    svc.update_session(first.id, first.start_ts, at(2026, 10, 6, 9, 45), "ops", "trimmed")
+    svc.edit_log(
+        log.id,
+        "rewritten",
+        [
+            SessionEdit(first.id, at(2026, 10, 6, 8, 30), at(2026, 10, 6, 9, 30), "ipinfo", "a"),
+            SessionEdit(None, at(2026, 10, 6, 13, 0), at(2026, 10, 6, 13, 30), "ipinfo", "new"),
+        ],
+    )
+    edited = svc.day_logs("2026-10-06")
+    assert len(edited) == 1
+    assert edited[0].id == log.id
+    assert edited[0].note == "rewritten"
+    assert [session.note for session in edited[0].sessions] == ["a", "new"]
+    assert len(svc.db.sessions_on("2026-10-06")) == 2
+    assert second.start_ts not in {row.start_ts for row in svc.db.sessions_on("2026-10-06")}
+    assert edited[0].start_ts == at(2026, 10, 6, 8, 30)
+    assert edited[0].end_ts == at(2026, 10, 6, 13, 30)
+    day = svc.db.get_day("2026-10-06")
+    assert day is not None
+    assert day.total_ms == 90 * 60 * 1000
+    assert svc.today_sessions("2026-10-06") == []
+
+
+def test_log_edits_are_checked_before_anything_changes(svc: TimerService, clock: Clock) -> None:
+    clock.value = at(2026, 10, 6, 18, 0)
+    kept = svc.add_manual(at(2026, 10, 6, 9, 0), at(2026, 10, 6, 10, 0), "ops", None)[0]
+    svc.submit_day("2026-10-06", "first")
+    other = svc.add_manual(at(2026, 10, 6, 12, 0), at(2026, 10, 6, 13, 0), "ops", None)[0]
+    log = svc.day_logs("2026-10-06")[0]
+    bad = [
+        [SessionEdit(kept.id, at(2026, 10, 6, 11, 30), at(2026, 10, 6, 12, 30), None, None)],
+        [SessionEdit(kept.id, at(2026, 10, 5, 23, 0), at(2026, 10, 6, 1, 0), None, None)],
+        [
+            SessionEdit(kept.id, at(2026, 10, 6, 9, 0), at(2026, 10, 6, 10, 0), None, None),
+            SessionEdit(None, at(2026, 10, 6, 9, 30), at(2026, 10, 6, 10, 30), None, None),
+        ],
+        [SessionEdit(kept.id, at(2026, 10, 6, 10, 0), at(2026, 10, 6, 9, 0), None, None)],
+        [],
+    ]
+    for edits in bad:
+        with pytest.raises(TimerError):
+            svc.edit_log(log.id, "changed", edits)
+    unchanged = svc.db.get_session(kept.id)
+    assert unchanged is not None
+    assert unchanged.start_ts == at(2026, 10, 6, 9, 0)
+    assert svc.day_logs("2026-10-06")[0].note == "first"
+    assert svc.db.get_session(other.id) is not None
     with pytest.raises(TimerError):
-        svc.update_session(session.id, session.start_ts, at(2026, 10, 6, 10, 30), None, None)
+        svc.submit_day("2026-10-07", None)
 
-    svc.reopen_day("2026-10-06")
-    svc.update_session(session.id, session.start_ts, at(2026, 10, 6, 10, 30), None, "edited")
-    reopened = svc.db.get_day("2026-10-06")
-    assert reopened is not None
-    assert reopened.status == "reopened"
-    assert reopened.total_ms == 90 * 60 * 1000
 
-    locked = svc.submit_day("2026-10-06", "ignored because nothing new")
-    assert locked.status == "submitted"
-    assert locked.total_ms == 90 * 60 * 1000
-    assert len(svc.day_logs("2026-10-06")) == 1
-    assert svc.day_logs("2026-10-06")[0].note == "once"
+def test_first_date_follows_the_project(svc: TimerService, clock: Clock) -> None:
+    clock.value = at(2026, 10, 9, 18, 0)
+    assert svc.first_date(None) is None
+    svc.add_manual(at(2026, 10, 1, 9, 0), at(2026, 10, 1, 10, 0), "ipinfo", None)
+    svc.add_manual(at(2026, 10, 7, 9, 0), at(2026, 10, 7, 10, 0), "side", None)
+    assert svc.first_date(None) == "2026-10-01"
+    assert svc.first_date("ipinfo") == "2026-10-01"
+    assert svc.first_date("side") == "2026-10-07"
 
 
 def test_rename_merges_projects_and_delete_removes_submitted_work(
