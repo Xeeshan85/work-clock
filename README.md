@@ -56,8 +56,8 @@ Flathub's own guides are the checklist that reviewers use:
 
 Do this before opening a submission:
 
-1. Add a `LICENSE` file. You choose the license. Flathub will not take the app without one.
-2. The public repository is [github.com/Xeeshan85/work-clock](https://github.com/Xeeshan85/work-clock). Tag a release such as `v1.0.0` only after the `LICENSE` file is in that tag. The application id has to match the repository: `io.github.Xeeshan85.work-clock`.
+1. The project is under the MIT license, in `LICENSE`. In the MetaInfo file, set `project_license` to `MIT`.
+2. The public repository is [github.com/Xeeshan85/work-clock](https://github.com/Xeeshan85/work-clock). The `v1.0.0` tag includes the license. The application id has to match the repository: `io.github.Xeeshan85.work-clock`.
 3. Use the app yourself for a while and keep a real commit history. Flathub rejects projects that have only just appeared.
 4. Take screenshots of the stopwatch, the countdown, and History. The MetaInfo file has to include them.
 5. Turn on two-factor authentication for your GitHub account. Flathub asks for it when they give you the app repository.
